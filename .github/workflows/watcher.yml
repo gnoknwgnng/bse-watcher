@@ -1,0 +1,54 @@
+name: BSE Announcement Watcher
+
+on:
+  workflow_dispatch: {}      # lets you (or the self-chain step) start a run manually/programmatically
+  schedule:
+    - cron: "0 */6 * * *"    # safety net: force-restart every 6h in case the chain ever breaks
+
+# Needed so this workflow can commit the updated state.json back to the repo
+permissions:
+  contents: write
+
+concurrency:
+  group: bse-watcher
+  cancel-in-progress: false   # never kill an in-progress run; just queue
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355      # hard safety cap, just above the script's own 350-min limit
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install bse requests
+
+      - name: Run watcher
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python watcher.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "bse-watcher-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json
+          git diff --quiet --cached || git commit -m "Update watcher state [skip ci]"
+          git push
+
+      - name: Trigger next run
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/watcher.yml/dispatches \
+            -d '{"ref":"${{ github.ref_name }}"}'
